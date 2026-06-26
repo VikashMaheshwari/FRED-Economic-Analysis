@@ -28,23 +28,30 @@ C = dict(train="#2563EB", test="#16A34A", forecast="#DC2626",
 
 
 # ── Data ───────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner="Fetching RSXFS from FRED …")
+def _synthetic_data():
+    dates    = pd.date_range("1992-01-01", "2025-01-01", freq="MS")
+    n        = len(dates)
+    trend    = np.linspace(140_000, 680_000, n)
+    seasonal = 22_000 * np.sin(2 * np.pi * np.arange(n) / 12 - np.pi / 2)
+    noise    = np.random.default_rng(42).normal(0, 6_000, n)
+    return pd.DataFrame({"retail_sales": trend + seasonal + noise}, index=dates)
+
+@st.cache_data(show_spinner="Loading RSXFS data …")
 def load_data():
     try:
+        import requests
         import pandas_datareader.data as web
         from datetime import datetime
+        # Test connectivity with a short timeout before blocking on the full fetch
+        requests.get("https://fred.stlouisfed.org", timeout=4)
+        session = requests.Session()
+        session.request = lambda method, url, **kw: requests.Session.request(
+            session, method, url, timeout=10, **kw)
         df = web.DataReader("RSXFS", "fred", datetime(1992, 1, 1), datetime(2025, 1, 1))
         df.columns = ["retail_sales"]
         return df, "FRED API"
     except Exception:
-        # Synthetic fallback so the app still runs without an API key
-        dates = pd.date_range("1992-01-01", "2025-01-01", freq="MS")
-        n = len(dates)
-        trend    = np.linspace(140_000, 680_000, n)
-        seasonal = 22_000 * np.sin(2 * np.pi * np.arange(n) / 12 - np.pi / 2)
-        noise    = np.random.default_rng(42).normal(0, 6_000, n)
-        df = pd.DataFrame({"retail_sales": trend + seasonal + noise}, index=dates)
-        return df, "Synthetic (FRED API key not set)"
+        return _synthetic_data(), "Synthetic (FRED offline or unreachable)"
 
 
 df, source = load_data()
@@ -108,7 +115,7 @@ if page == "📊 Overview":
 
     fig.update_layout(height=420, xaxis_title="Date", yaxis_title="$ Millions",
                       margin=dict(l=0, r=0, t=20, b=0), showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     with st.expander("📋 Summary Statistics"):
         st.dataframe(df['retail_sales'].describe().rename("Value").apply(lambda x: f"${x:,.0f}M"))
@@ -134,7 +141,7 @@ elif page == "🔀 Decomposition":
         fig.add_trace(go.Scatter(x=data.index, y=data, mode='lines',
                                  line=dict(color=color, width=1.5), showlegend=False), row=row, col=1)
     fig.update_layout(height=750, margin=dict(l=0, r=0, t=60, b=0))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     st.markdown("### 📅 Average Seasonal Effect by Month")
     months = [calendar.month_abbr[m] for m in seasonal_avg.index]
@@ -142,7 +149,7 @@ elif page == "🔀 Decomposition":
                              marker_color=[C['forecast'] if v < 0 else C['test'] for v in seasonal_avg.values]))
     fig2.update_layout(height=300, yaxis_title="Additive Effect ($ Millions)",
                        margin=dict(l=0, r=0, t=10, b=0))
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, width='stretch')
 
     peak   = seasonal_avg.idxmax()
     trough = seasonal_avg.idxmin()
@@ -165,7 +172,7 @@ elif page == "📐 Stationarity & ACF/PACF":
         }
 
     results = [adf(df['retail_sales'], "Original"), adf(df['diff1'], "1st Difference")]
-    st.dataframe(pd.DataFrame(results).set_index("Series"), use_container_width=True)
+    st.dataframe(pd.DataFrame(results).set_index("Series"), width='stretch')
 
     st.markdown("---")
     st.subheader("ACF & PACF (1st Differenced Series)")
@@ -197,8 +204,8 @@ elif page == "📐 Stationarity & ACF/PACF":
         return fig
 
     c1, c2 = st.columns(2)
-    c1.plotly_chart(corr_chart(acf_vals, acf_ci, "ACF — 1st Diff"), use_container_width=True)
-    c2.plotly_chart(corr_chart(pacf_vals, pacf_ci, "PACF — 1st Diff"), use_container_width=True)
+    c1.plotly_chart(corr_chart(acf_vals, acf_ci, "ACF — 1st Diff"), width='stretch')
+    c2.plotly_chart(corr_chart(pacf_vals, pacf_ci, "PACF — 1st Diff"), width='stretch')
 
     st.info("**Reading:** PACF cuts off after lag 1 → AR(1). ACF cuts off after lag 1 → MA(1). "
             "Spikes at lags 12, 24 → seasonal AR/MA. → **SARIMA(1,1,1)(1,1,1)[12]**")
@@ -257,15 +264,15 @@ elif page == "🔮 SARIMA Forecast":
         fill='toself', fillcolor=C['ci'], line=dict(color='rgba(0,0,0,0)'),
         name=f'{ci_level} CI', showlegend=True))
 
-    fig.add_vline(x=str(test.index[0]), line_dash='dot', line_color='gray',
+    fig.add_vline(x=test.index[0].timestamp() * 1000, line_dash='dot', line_color='gray',
                   annotation_text='Train/Test', annotation_position='top left')
-    fig.add_vline(x=str(fut_mean.index[0]), line_dash='dashdot', line_color='gray',
+    fig.add_vline(x=fut_mean.index[0].timestamp() * 1000, line_dash='dashdot', line_color='gray',
                   annotation_text='Test/Future', annotation_position='top left')
 
     fig.update_layout(height=500, xaxis_title="Date", yaxis_title="$ Millions",
                       legend=dict(orientation='h', y=-0.15),
                       margin=dict(l=0, r=0, t=20, b=0))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     col1, col2 = st.columns(2)
     with col1:
@@ -276,7 +283,7 @@ elif page == "🔮 SARIMA Forecast":
             f"Lower {ci_level}": fut_ci.iloc[:,0].values.round(0).astype(int),
             f"Upper {ci_level}": fut_ci.iloc[:,1].values.round(0).astype(int),
         })
-        st.dataframe(fut_df.set_index("Month"), use_container_width=True)
+        st.dataframe(fut_df.set_index("Month"), width='stretch')
     with col2:
         st.subheader("Model Info")
         st.code(f"""SARIMA({sarima_p},1,{sarima_q})(1,1,1)[12]
